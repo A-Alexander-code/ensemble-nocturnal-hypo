@@ -26,6 +26,9 @@ from statsmodels.regression.linear_model import burg
 import warnings
 warnings.filterwarnings("ignore")
 
+# >>>>>>>>>>>>>>>>>> We add the import of ReliefF >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+from skrebate import ReliefF
+
 
 #################### aggregation functions - functions #################################
 
@@ -83,10 +86,10 @@ def inner_slope(X,indices):
     SUMxy = 0
     SUMxx = 0
     for i in range(ncols):
-        SUMx = SUMx + indices[i]
-        SUMy = SUMy + X[i]
-        SUMxy = SUMxy + indices[i]*X[i]
-        SUMxx = SUMxx + indices[i]*indices[i]
+        SUMx += indices[i]
+        SUMy += X[i]
+        SUMxy += indices[i]*X[i]
+        SUMxx += indices[i]*indices[i]
     return ( SUMx*SUMy - ncols*SUMxy ) / ( SUMx*SUMx - ncols*SUMxx )
 
 
@@ -195,7 +198,7 @@ def balanceSample(X_train,y_train):
     X_train_to_add = []
     y_train_to_add = []
 
-    for p in range(0,len(all_classes_lessthanavg)):
+    for p in range(len(all_classes_lessthanavg)):
         current_class = all_classes_lessthanavg[p]
         current_class_idx = np.where(all_classes==current_class)[0]
         toadd = avg_ninstances_per_class-ninstances_per_class[current_class_idx]
@@ -211,7 +214,7 @@ def balanceSample(X_train,y_train):
         X_train_to_add+=X_train_to_add_c
         y_train_to_add+=y_train_to_add_c
     
-    return X_train_to_add,y_train_to_add
+    return X_train_to_add, y_train_to_add
 
 
 
@@ -228,7 +231,9 @@ def inner_std2(X,Xmean):
     else:
         return (accum/(ncols-1))**0.5
 
+# >>>>>>>> Function originally used for Fisher Score (it is optional to maintain them) >>>>>>>>>>
 
+'''
 
 @jit(nopython=True, fastmath = True)
 def fisherScore(X_feat,y):
@@ -251,9 +256,28 @@ def fisherScore(X_feat,y):
         return 0
     else:
         return accum_numerator/accum_denominator
-    
 
+'''
+
+# >>>>>>>>>>> New function that uses ReliefF to obtain an importance metric >>>>>>>>>>>>>>>>>>>>>>>>
+
+def reliefScore(X_feat, y, n_neighbors=10):
+    """
+    X_feat: 1D vector with the features (n_sample, )
+    Y: label vector (n_sample, )
+    Returns an importance scalar value (the higher, greater relevance)
+    """
+    # We ensure form (n_sample, 1) for ReliefF to tinterpret it as 1 feature
+    X_2d = X_feat.reshape(-1, 1)
     
+    # We create the ReliefF object, adjusting n_neighbors if necessary
+    relief = ReliefF(n_neighbors=n_neighbors)
+    relief.fit(X_2d, y)
+    
+    # Being 1 only feature, its importance is in post 0
+    return relief.feature_importances_[0]
+
+
 # @jit(nopython=True, fastmath=True)
 def supervisedSearch(X, y, ini_idx, agg_fn, repr_type, X_ori):
 
@@ -264,33 +288,43 @@ def supervisedSearch(X, y, ini_idx, agg_fn, repr_type, X_ori):
 
         _,len_subinterval = X.shape
         
+        # Cutting critera by size
         if (agg_fn==np.polyfit and len_subinterval < 4) or (len_subinterval < 2):
             break
         
+        # A random cutting point is chosen
         if agg_fn == np.polyfit:
             div_point = random.randint(2,len_subinterval-2)
         else:
             div_point = random.randint(1,len_subinterval-1)
+        
         sub_interval_0 = X[:,:div_point]
         sub_interval_1 = X[:,div_point:]
         
-        interval_feature_0 = getIntervalFeature(sub_interval_0,agg_fn)
-        interval_feature_1 = getIntervalFeature(sub_interval_1,agg_fn)
-
+        interval_feature_0 = getIntervalFeature(sub_interval_0, agg_fn)
+        interval_feature_1 = getIntervalFeature(sub_interval_1, agg_fn)
+        
+        '''
         score_0 = fisherScore(interval_feature_0,y)
         score_1 = fisherScore(interval_feature_1,y)
+        '''
         
+        # >>>>>>>>>>>>>> We use ReliefF instead of Fisher score >>>>>>>>>>>>>>>>>>>>>>>>
+        score_0 = reliefScore(interval_feature_0, y)
+        score_1 = reliefScore(interval_feature_1, y)
+        
+        # We compare both subintervals
         if score_0 >= score_1 and score_0!=0:     ####if true explore sub_interval_0
             w = len(sub_interval_0[0])
             ini = ini_idx+0
             ini_idx = ini
             end = ini+w
             
-            candidate_agg_feats.append((w,score_0,ini,end,agg_fn,repr_type))                
+            candidate_agg_feats.append((w, score_0, ini, end, agg_fn, repr_type))                
             X = sub_interval_0
 
             interval_feature_touse = getIntervalFeature(X_ori[:,ini:end],agg_fn)
-            XT = np.hstack((XT,np.reshape(interval_feature_touse,(interval_feature_touse.shape[0],1))))
+            XT = np.hstack((XT,np.reshape(interval_feature_touse, (interval_feature_touse.shape[0],1))))
             
         elif score_1 > score_0:  ####if true explore sub_interval_1
             w = len(sub_interval_1[0])
@@ -298,13 +332,13 @@ def supervisedSearch(X, y, ini_idx, agg_fn, repr_type, X_ori):
             ini_idx = ini
             end = ini+w
             
-            candidate_agg_feats.append((w,score_1,ini,end,agg_fn,repr_type))            
+            candidate_agg_feats.append((w, score_1, ini, end,agg_fn, repr_type))            
             X = sub_interval_1
             
-            interval_feature_touse = getIntervalFeature(X_ori[:,ini:end],agg_fn)
-            XT = np.hstack((XT,np.reshape(interval_feature_touse,(interval_feature_touse.shape[0],1))))
-            
+            interval_feature_touse = getIntervalFeature(X_ori[:,ini:end], agg_fn)
+            XT = np.hstack((XT, np.reshape(interval_feature_touse,(interval_feature_touse.shape[0],1))))
         else:
+            # If there is no improvement, it stops
             break
             
     XT = XT[:,1:]
@@ -386,6 +420,7 @@ def getIntervalFeature(sub_interval,agg_fn):
     elif agg_fn == np.quantile:
         return count_values_above_mean(sub_interval)
     else:
+        # If agg_gn is, for example, np.min, np.max, etc.
         return agg_fn(sub_interval,axis=1)
     
 
@@ -411,7 +446,7 @@ def getIntervalBasedTransform(X,per_X,diff_X,ar_X,candidate_agg_feats,relevant_c
 
     return X_transform
 
-    
+
 
 def getTrainTestSets(dset_name):
     path = "sampleUCRdatasets/" #replace with the path where the UCR datasets are located
@@ -595,5 +630,3 @@ def rois_per_aggfn (X_test,y_test,all_trees_predict,all_start_idx,all_end_idx,al
             for j in range(len(all_start_idx_to_use)):
                 intensity_map[i,all_start_idx_to_use[j]:all_end_idx_to_use[j]] += 1
     return intensity_map
-
-
